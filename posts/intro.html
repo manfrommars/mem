@@ -1,0 +1,166 @@
+<!DOCTYPE HTML PUBLIC "-//W3C//DTD HTML 4.01 Transitional//EN">
+<html>
+<head>
+<meta http-equiv="content-type" content="text/html; charset=utf-8">
+<meta name="generator" content="ReText 7.0.1">
+<title>intro</title>
+</head>
+<body>
+<h1>Entering the Wonderful World of Memory Verification</h1>
+<h1>The Quest</h1>
+<p>As a developer most at home in low-level languages (mainly C, also some C++), issues presented for my attention are oftentimes low-level, hard to find, and hard to reproduce.  Courtesy of many others’ hard work, there are now a number of excellent tools which can be exercised when developing and testing which help to catch the most egregious issues in a reliable and dependable manner.  Having said that, no one seems to really know just how reliable the tools are, or their failure modes (if any).  With that in mind, I’ve started this blog to document my investigation into the tools available.  Topics for exploration include: how they work, what they do under the hood, performance, outputs, failures (if any), and any related topics that show up while examining this.</p>
+<p>Initially the investigation will be on Linux, and limited to two (three?) tools:  <a href="http://valgrind.org/info/tools.html">Valgrind</a> (specifically Memcheck to start), <a href="https://github.com/google/sanitizers/wiki/AddressSanitizer">AddressSanitizer</a>, and <a href="https://github.com/google/sanitizers/wiki/MemorySanitizer">MemorySanitizer</a>.  Initially I’ll be working in C before expanding the coverage to C++ to investigate some unique ways to shoot yourself in the foot for the unwary.  The sample code will all be posted on my github here:
+https://github.com/manfrommars/mem</p>
+<h1>The Environment</h1>
+<p>For starters, I’ll be using the packages available on the current latest Ubuntu LTS release (18.04) running in a VM on an Intel x86 platform because it was available.  Hopefully other platforms will be available for more testing in the future, and I’ve already come to terms with the fact that I’ll be building from source sooner rather than later.  But that’s for another time, let’s make some busted computer programs and see what happens!</p>
+<h1>The Tests</h1>
+<h2>Baseline</h2>
+<p>For starters, let’s run a simple test application that doesn’t have any nasty memory bugs in it, confirming that truly, programmers can be brilliant when given the time (and suuuper simple requirements).  Let’s make a program that allocates some heap data, throws that on the end of a singly-linked list, then destroys the list before exiting.</p>
+<pre><code class="C">#include &lt;stdlib.h&gt;
+
+struct node {
+    int i;
+    struct node* next;
+};
+
+void append_new_node_to_list(struct node** list) {
+    struct node* l = *list;
+    struct node* n = calloc(1, sizeof(struct node));
+
+    if (l) {
+        while (l-&gt;next) {
+            l = l-&gt;next;
+        }
+        l-&gt;next = n;
+    } else {
+        *list = n;
+    }
+}
+
+void destroy_linked_list(struct node* list) {
+    while (list) {
+        struct node* temp = list;
+        list = list-&gt;next;
+        free(temp);
+    }
+}
+
+int main() {
+    struct node* list = NULL;
+    append_new_node_to_list(&amp;list);
+    append_new_node_to_list(&amp;list);
+
+    destroy_linked_list(list);
+    return 0;
+}
+</code></pre>
+
+<h1>The Results</h1>
+<h2>Part 1: Valgrind</h2>
+<p>One of the reasons valgrind is so widely known and used is the ease of use—simply running valgrind and passing our executable is enough to see if our program leaks any memory or does anything untoward:</p>
+<pre><code>$ valgrind test1/cmake-build-debug/test1
+==39177== Memcheck, a memory error detector
+==39177== Copyright (C) 2002-2017, and GNU GPL'd, by Julian Seward et al.
+==39177== Using Valgrind-3.13.0 and LibVEX; rerun with -h for copyright info
+==39177== Command: test1/cmake-build-debug/test1
+==39177== 
+==39177== 
+==39177== HEAP SUMMARY:
+==39177==     in use at exit: 0 bytes in 0 blocks
+==39177==   total heap usage: 2 allocs, 2 frees, 32 bytes allocated
+==39177== 
+==39177== All heap blocks were freed -- no leaks are possible
+==39177== 
+==39177== For counts of detected and suppressed errors, rerun with: -v
+==39177== ERROR SUMMARY: 0 errors from 0 contexts (suppressed: 0 from 0)
+$
+</code></pre>
+
+<p>As expected, all blocks were freed before exiting, and thus our program does not leak memory.  Digging into the output here, note that valgrind indicates the tool running (Memcheck) on startup.  There are many more in the general valgrind toolset that can be used for other purposes we can investigate later.</p>
+<h2>Part 2: AddressSanitizer</h2>
+<p>Using AddressSanitizer (ASAN) is somewhat more involved… ASAN must be linked in to the executable, which can cause issues with size, and means that the tool must be incorporated in the project build rather than applied after the fact.  Both llvm/clang and gcc support ASAN; from the command line, pass -fsanitize=address to compile/link with ASAN.  If your build infrastructure separates the compile and link steps, you may also need to add -lasan to resolve link-time dependencies like the following:</p>
+<pre><code>CMakeFiles/test1-asan.dir/main.c.o: In function `append_new_node_to_list':
+/home/elliot/mem/test1/main.c:10: undefined reference to `__asan_report_load8'
+/home/elliot/mem/test1/main.c:12: undefined reference to `__asan_report_load8'
+/home/elliot/mem/test1/main.c:12: undefined reference to `__asan_report_load8'
+/home/elliot/mem/test1/main.c:11: undefined reference to `__asan_report_load8'
+/home/elliot/mem/test1/main.c:11: undefined reference to `__asan_report_load8'
+/home/elliot/mem/test1/main.c:14: undefined reference to `__asan_report_store8'
+/home/elliot/mem/test1/main.c:16: undefined reference to `__asan_report_store8'
+CMakeFiles/test1-asan.dir/main.c.o: In function `destroy_linked_list':
+/home/elliot/mem/test1/main.c:23: undefined reference to `__asan_report_load8'
+CMakeFiles/test1-asan.dir/main.c.o: In function `main':
+/home/elliot/mem/test1/main.c:28: undefined reference to `__asan_option_detect_stack_use_after_return'
+/home/elliot/mem/test1/main.c:28: undefined reference to `__asan_stack_malloc_0'
+/home/elliot/mem/test1/main.c:29: undefined reference to `__asan_report_store8'
+/home/elliot/mem/test1/main.c:33: undefined reference to `__asan_report_load8'
+CMakeFiles/test1-asan.dir/main.c.o: In function `_GLOBAL__sub_I_00099_0_append_new_node_to_list':
+/home/elliot/mem/test1/main.c:35: undefined reference to `__asan_init'
+/home/elliot/mem/test1/main.c:35: undefined reference to `__asan_version_mismatch_check_v8'
+collect2: error: ld returned 1 exit status
+CMakeFiles/test1-asan.dir/build.make:94: recipe for target 'test1-asan' failed
+make[2]: *** [test1-asan] Error 1
+CMakeFiles/Makefile2:67: recipe for target 'CMakeFiles/test1-asan.dir/all' failed
+make[1]: *** [CMakeFiles/test1-asan.dir/all] Error 2
+Makefile:83: recipe for target 'all' failed
+make: *** [all] Error 2
+</code></pre>
+
+<p>With that completed, running the finished program from the command line will check whether there are any leaks or other memory issues:</p>
+<pre><code>$ test1/cmake-build-debug/test1-asan
+$
+</code></pre>
+
+<p>Success! …maybe?  How do we know if it actually ran?  Taking the cowards way out for now, let’s remove the <code>destroy()</code> call in our test program and watch the world burn:</p>
+<pre><code>$ test1/cmake-build-debug/test1-asan 
+
+=================================================================
+==39838==ERROR: LeakSanitizer: detected memory leaks
+
+Direct leak of 16 byte(s) in 1 object(s) allocated from:
+    #0 0x7f59db9e9d38 in __interceptor_calloc (/usr/lib/x86_64-linux-gnu/libasan.so.4+0xded38)
+    #1 0x56537bfeca04 in append_new_node_to_list /home/elliot/mem/test1/main.c:9
+    #2 0x56537bfecc5b in main /home/elliot/mem/test1/main.c:30
+    #3 0x7f59db53bb96 in __libc_start_main (/lib/x86_64-linux-gnu/libc.so.6+0x21b96)
+
+Indirect leak of 16 byte(s) in 1 object(s) allocated from:
+    #0 0x7f59db9e9d38 in __interceptor_calloc (/usr/lib/x86_64-linux-gnu/libasan.so.4+0xded38)
+    #1 0x56537bfeca04 in append_new_node_to_list /home/elliot/mem/test1/main.c:9
+    #2 0x56537bfecc67 in main /home/elliot/mem/test1/main.c:31
+    #3 0x7f59db53bb96 in __libc_start_main (/lib/x86_64-linux-gnu/libc.so.6+0x21b96)
+
+SUMMARY: AddressSanitizer: 32 byte(s) leaked in 2 allocation(s).
+</code></pre>
+
+<p>There we have it, address sanitizer is running and protecting us from ourselves under the hood and will definitely let us know when we’ve stepped in it.</p>
+<h2>Part 3: Valgrind, Redux</h2>
+<p>Just for grins, what does valgrind say about our new, sad state of things?</p>
+<pre><code>$ valgrind test1/cmake-build-debug/test1
+==39843== Memcheck, a memory error detector
+==39843== Copyright (C) 2002-2017, and GNU GPL'd, by Julian Seward et al.
+==39843== Using Valgrind-3.13.0 and LibVEX; rerun with -h for copyright info
+==39843== Command: test1/cmake-build-debug/test1
+==39843== 
+==39843== 
+==39843== HEAP SUMMARY:
+==39843==     in use at exit: 32 bytes in 2 blocks
+==39843==   total heap usage: 2 allocs, 0 frees, 32 bytes allocated
+==39843== 
+==39843== LEAK SUMMARY:
+==39843==    definitely lost: 16 bytes in 1 blocks
+==39843==    indirectly lost: 16 bytes in 1 blocks
+==39843==      possibly lost: 0 bytes in 0 blocks
+==39843==    still reachable: 0 bytes in 0 blocks
+==39843==         suppressed: 0 bytes in 0 blocks
+==39843== Rerun with --leak-check=full to see details of leaked memory
+==39843== 
+==39843== For counts of detected and suppressed errors, rerun with: -v
+==39843== ERROR SUMMARY: 0 errors from 0 contexts (suppressed: 0 from 0)
+$
+</code></pre>
+
+<h1>Conclusion</h1>
+<p>Wrapping up, its obvious that both of these tools are a powerful addition to the programmer’s toolbox when looking for issues.  There are many advantages and disadvantages to both which will be examined in depth at a later time; familiarity with both will allow application of the proper tool to the problem at hand.
+Worth noting as well, these programs were built and executed without any special options, optimization, or compiler assistance beyond the defaults.</p>
+</body>
+</html>
