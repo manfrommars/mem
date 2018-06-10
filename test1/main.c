@@ -6,12 +6,13 @@ struct node {
 };
 
 void append_new_node_to_list(struct node** list) {
+    struct node* l = *list;
     struct node* n = calloc(1, sizeof(struct node));
-    if (*list) {
-        while ((*list)->next) {
-            (*list) = (*list)->next;
+    if (l) {
+        while (l->next) {
+            l = l->next;
         }
-        (*list)->next = n;
+        l->next = n;
     } else {
         *list = n;
     }
